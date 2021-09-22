@@ -1,3 +1,12 @@
+/*
+Author: Tully McDonald
+Purpose: Calculate and visualise the Mandelbrot set for a given width/height
+Contact: tmcdon26@myune.edu.au
+
+Credit: Portions of this program was inspired by UNE (COSC330)
+
+*/
+
 #include <stdio.h>
 #include <cuda_runtime.h>
 #include "bmpfile.h"
@@ -12,80 +21,17 @@
 #define COLOUR_MAX 240.0
 #define GRADIENT_COLOUR_MAX 230.0
 
-__global__ void mandelbrot(int *A, size_t size) {
-    int thread_id = threadIdx.x;
-    int block_dim = blockDim.x;
-    int block_id = blockIdx.x;
-    int grid_dim = gridDim.x;
-    int id = threadIdx.x + blockIdx.x * blockDim.x;
-    // printf("hi\n");
-
-    // while (thread_id < size) {
-        // if (blockIdx.x == 0)
-        printf("Thread_id: %d, Block_dim: %d, Block_id: %d, Grid_dim: %d, Id: %d\n", 
-        thread_id, block_dim, block_id, grid_dim, id);
-        // atomicAdd(result, A[id]);
-        // atomicAdd(result, B[id]);
-        // printf("%d += %d + %d\n", *result, A[id], B[id]);
-        thread_id += blockDim.x * gridDim.x;
-    // }
-}
-
-__global__ void MyKernel(double *A, const int width, const int height) {
-    int id = threadIdx.x + blockIdx.x * blockDim.x;
-    int thread_id = threadIdx.x;
-    int block_dim = blockDim.x;
-    int block_id = blockIdx.x;
-    int grid_dim = gridDim.x;
-    // printf("Thread_id: %d, Block_dim: %d, Block_id: %d, Grid_dim: %d, Id: %d\n", 
-        // thread_id, block_dim, block_id, grid_dim, id);
-    int xoffset = -(width - 1) /2;
-    int yoffset = (height -1) / 2;
-    // int col = block_id;
-    // int row = thread_id;
-
-    for (int col = 0; col < width; col++) {
-        for (int row = 0; row < height; row++) {
-
-    
-    double x = XCENTER + (xoffset + col) / RESOLUTION;
-    double y = YCENTER + (yoffset - row) / RESOLUTION;
-
-    //Mandelbrot stuff
-    double a = 0;
-    double b = 0;
-    double aold = 0;
-    double bold = 0;
-    double zmagsqr = 0;
-    int iter = 0;
-    double x_col = 0;
-    while(iter < MAX_ITER && zmagsqr <= 4.0){
-        ++iter;
-	    a = (aold * aold) - (bold * bold) + x;
-        b = 2.0 * aold*bold + y;
-
-        zmagsqr = a*a + b*b;
-
-        aold = a;
-        bold = b;	
-        // printf("iter: %d\n", iter);
-
-        }
-    x_col =  (COLOUR_MAX - (( ((float) iter / ((float) MAX_ITER) * GRADIENT_COLOUR_MAX))));
-    A[row*col] = x_col;
-        }
-    }
-}
-
-void GroundColorMix(double* color, double x, double min, double max)
+// Device function called by the Mandelbrot kernel to calculate the 
+// colors of our pixels
+__device__ void GroundColorMix(float* color, float x, float min, float max)
 {
   /*
    * Red = 0
    * Green = 1
    * Blue = 2
    */
-    double posSlope = (max-min)/60;
-    double negSlope = (min-max)/60;
+    float posSlope = (max-min)/60;
+    float negSlope = (min-max)/60;
 
     if( x < 60 )
     {
@@ -131,6 +77,46 @@ void GroundColorMix(double* color, double x, double min, double max)
     }
 }
 
+// Mandelbrot kernel, performs computations across all pixels to determine if
+// coordinates fall under the mandelbrot set 
+__global__ void Mandelbrot(rgb_pixel_t *A, const int width, const int height,
+ const int xoffset, const int yoffset) {
+    int id = threadIdx.x + blockIdx.x * blockDim.x;
+    int col = threadIdx.x;
+    int row = blockIdx.x;
+    
+    float x = XCENTER + (xoffset + col) / RESOLUTION;
+    float y = YCENTER + (yoffset - row) / RESOLUTION;
+
+    //Mandelbrot stuff
+    float a = 0;
+    float b = 0;
+    float aold = 0;
+    float bold = 0;
+    float zmagsqr = 0;
+    int iter = 0;
+    float color[3];
+    float x_col = 0;
+    // Check the first MAX_ITER numbers to see if the results are probably
+    // approaching infinity
+    while(iter < MAX_ITER && zmagsqr <= 4.0){
+        ++iter;
+	    a = (aold * aold) - (bold * bold) + x;
+        b = 2.0 * aold*bold + y;
+        zmagsqr = a*a + b*b;
+        aold = a;
+        bold = b;	
+    }
+    // Fetch the color and set the pixel values
+    x_col =  (COLOUR_MAX - (( ((float) iter / ((float) MAX_ITER) 
+    * GRADIENT_COLOUR_MAX))));
+    GroundColorMix(color, x_col, 1, COLOUR_DEPTH);
+    A[id].red = color[0];
+    A[id].green = color[1];
+    A[id].blue = color[2];
+}
+
+// Check valid params and place into variables
 void parse_args(int argc, char *argv[], int *width, int *height) {
     if (argc != 3 || (*width = atoi(argv[1])) == 0 
         || (*height = atoi(argv[2])) == 0) {
@@ -139,156 +125,88 @@ void parse_args(int argc, char *argv[], int *width, int *height) {
     }
 }
 
+// Termination sequence, print error message and exit
+void terminate(const char msg[], const char err[]) {
+    fprintf(stderr, msg);
+    fprintf(stderr, err);
+    fprintf(stderr, "\n\n");
+    exit(EXIT_FAILURE);
+}
+void terminate(const char msg[]) {
+    fprintf(stderr, msg);
+    exit(EXIT_FAILURE);
+}
+
+// Main function coordinates the program
 int main(int argc, char *argv[]) {
     int width, height;
     parse_args(argc, argv, &width, &height);
     int numElements = width*height;
-    float *devPtr;
-    size_t pitch;
+    int size = numElements*sizeof(rgb_pixel_t);
+
+    rgb_pixel_t *h_A = (rgb_pixel_t *)malloc(size);
+    rgb_pixel_t *d_A = NULL;
     cudaError_t err = cudaSuccess;
     bmpfile_t *bmp;
-    rgb_pixel_t pixel = {0, 0, 0, 0};
+    bmp = bmp_create(width, height, 32);
     int xoffset = -(width - 1) /2;
     int yoffset = (height -1) / 2;
-    bmp = bmp_create(width, height, 32);
-    int col = 0;
-    int row = 0;
-    int size = width*height*sizeof(double);
 
-    double *h_A = (double *)malloc(size);
-
+    // Error check h_A
     if (h_A == NULL)
-    {
-        fprintf(stderr, "Failed to allocate host vectors!\n");
-        exit(EXIT_FAILURE);
-    }
+        terminate("Failed to allocate host vectors\n");
 
-     for (int i = 0; i < numElements; ++i)
-    {
-        h_A[i] = 0.0;
-    }
-
-    double *d_A = NULL;
-    err = cudaMalloc((void **)&d_A, size);
-
-    if (err != cudaSuccess)
-    {
-        fprintf(stderr, "Failed to allocate device vector A (error code %s)!\n", cudaGetErrorString(err));
-        exit(EXIT_FAILURE);
-    }
-
-    err = cudaMemcpy(d_A, h_A, size, cudaMemcpyHostToDevice);
-
-    if (err != cudaSuccess)
-    {
-        fprintf(stderr, "Failed to copy vector A from host to device (error code %s)!\n", cudaGetErrorString(err));
-        exit(EXIT_FAILURE);
-    }
-
-//     for(col = 0; col < width; col++){
-//      for(row = 0; row < height; row++){
-        
-//         //Determine where in the mandelbrot set, the pixel is referencing
-//         double x = XCENTER + (xoffset + col) / RESOLUTION;
-//         double y = YCENTER + (yoffset - row) / RESOLUTION;
-
-//         //Mandelbrot stuff
-
-//         double a = 0;
-//         double b = 0;
-//         double aold = 0;
-//         double bold = 0;
-//         double zmagsqr = 0;
-//         int iter =0;
-// 	    double x_col;
-//         double color[3];
-//         //Check if the x,y coord are part of the mendelbrot set - refer to the algorithm
-//         while(iter < MAX_ITER && zmagsqr <= 4.0){
-//             ++iter;
-// 	        a = (aold * aold) - (bold * bold) + x;
-//             b = 2.0 * aold*bold + y;
-
-//             zmagsqr = a*a + b*b;
-
-//             aold = a;
-//             bold = b;	
-
-//         }
-        
-//         /* Generate the colour of the pixel from the iter value */
-//         /* You can mess around with the colour settings to use different gradients */
-//         /* Colour currently maps from royal blue to red */ 
-//         x_col =  (COLOUR_MAX - (( ((float) iter / ((float) MAX_ITER) * GRADIENT_COLOUR_MAX))));
-//         // GroundColorMix(color, x_col, 1, COLOUR_DEPTH);
-//         // pixel.red = color[0];
-//         // pixel.green = color[1];
-// 	    // pixel.blue = color[2];
-//         // pixel.red = 250;
-//         // bmp_set_pixel(bmp, col, row, pixel);
-
-//      }
-
-
-//   }
-
-
-
-
-
-
+    // Initialise h_A
+    for (int i = 0; i < numElements; ++i)
+        h_A[i] = {0,0,0,0};
     
+    // Allocate cuda memory for A
+    err = cudaMalloc((void **)&d_A, size);
+    if (err != cudaSuccess)
+        terminate("Failed to allocate device vector A\n", 
+        cudaGetErrorString(err));
+
+    // Copy h_A to d_A
+    err = cudaMemcpy(d_A, h_A, size, cudaMemcpyHostToDevice);
+    if (err != cudaSuccess)
+        terminate("Failed to copy vector A from host to device\n", 
+        cudaGetErrorString(err));
+    
+    // Perform CUDA kernel call
     int threadsPerBlock = width;
     int blocksPerGrid = (numElements+threadsPerBlock-1)/threadsPerBlock;
-    printf("CUDA kernel launch with %d blocks of %d threads\n", blocksPerGrid, threadsPerBlock);
+    printf("CUDA kernel launch with %d blocks of %d threads\n", 
+    blocksPerGrid, threadsPerBlock);
+    Mandelbrot<<<blocksPerGrid, threadsPerBlock>>>(d_A, width, height, 
+    xoffset, yoffset);
 
-    // mandelbrot<<<blocksPerGrid, threadsPerBlock>>>(d_A, size);
-
-    MyKernel<<<blocksPerGrid, threadsPerBlock>>>(d_A, width, height);
+    // Error check
     err = cudaGetLastError();
-
     if (err != cudaSuccess)
-    {
-        fprintf(stderr, "Failed to launch vectorAdd kernel (error code %s)!\n", cudaGetErrorString(err));
-        exit(EXIT_FAILURE);
-    }
+        terminate("Failed to launch vectorAdd kernel\n", 
+        cudaGetErrorString(err));
 
+    // Copy d_A to h_A
     err = cudaMemcpy(h_A, d_A, size, cudaMemcpyDeviceToHost);
-
     if (err != cudaSuccess)
-    {
-        fprintf(stderr, "Failed to copy A from device to host (error code %s)!\n", cudaGetErrorString(err));
-        exit(EXIT_FAILURE);
-    }
+        terminate("Failed to copy A from device to host\n", 
+        cudaGetErrorString(err));
 
-    double color[3];
-    for (int col = 0; col < width; col++) {
-        for (int row = 0; row < height; row++) {
-            int i = row*col;
-            // printf("El %d = %f\n", i, h_A[i]);
-            GroundColorMix(color, h_A[i], 1, COLOUR_DEPTH);
-            pixel.red=color[0];
-            pixel.green=color[1];
-            pixel.blue=color[2];
-            bmp_set_pixel(bmp, col, row, pixel);
-        }
-    }
+    // Set the bmp file to returned pixel objects
+    for (int col = 0; col < width; col++)
+        for (int row = 0; row < height; row++)
+            bmp_set_pixel(bmp, col, row, h_A[row*width+col]);
 
-     bmp_save(bmp, FILENAME);
+    // Save file and unload it
+    bmp_save(bmp, FILENAME);
     bmp_destroy(bmp);
 
-   
-
     free(h_A);
+
     err = cudaFree(d_A);
-
     if (err != cudaSuccess)
-    {
-        fprintf(stderr, "Failed to free device vector A (error code %s)!\n", cudaGetErrorString(err));
-        exit(EXIT_FAILURE);
-    }
-
-
-
+        terminate("Failed to free device vector A\n", 
+        cudaGetErrorString(err));
 
     return 0;
 }

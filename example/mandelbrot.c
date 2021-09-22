@@ -120,7 +120,7 @@ int main(int argc, char **argv)
         //Check if the x,y coord are part of the mendelbrot set - refer to the algorithm
         while(iter < MAX_ITER && zmagsqr <= 4.0){
            ++iter;
-	   a = (aold * aold) - (bold * bold) + x;
+	        a = (aold * aold) - (bold * bold) + x;
            b = 2.0 * aold*bold + y;
 
            zmagsqr = a*a + b*b;
